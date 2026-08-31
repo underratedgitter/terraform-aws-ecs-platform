@@ -66,7 +66,7 @@ jobs:
       # Pinned to a release, not @master. An action reference that floats runs
       # whatever the upstream repository contains at the moment the job starts.
       - name: Trivy config scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
