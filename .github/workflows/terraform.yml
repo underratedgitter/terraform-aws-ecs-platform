@@ -1,0 +1,155 @@
+name: Terraform
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A plan takes the state lock. Two runs on the same branch would fight over it.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Format, validate and lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false so this needs no AWS credentials at all. Validation is a
+      # schema and type check, not a call to the API.
+      - name: Validate every configuration
+        run: |
+          set -euo pipefail
+          for dir in bootstrap envs/dev modules/*/; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false -no-color
+            terraform -chdir="$dir" validate -no-color
+            echo "::endgroup::"
+          done
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+
+      - name: Lint
+        run: |
+          set -euo pipefail
+          tflint --init
+          tflint --recursive --format compact
+
+  scan:
+    name: Scan for misconfiguration
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to a release, not @master. An action reference that floats runs
+      # whatever the upstream repository contains at the moment the job starts.
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          exit-code: '0'
+          severity: HIGH,CRITICAL
+
+      - name: Upload results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+  plan:
+    name: Plan dev
+    runs-on: ubuntu-latest
+    needs: static
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      id-token: write # required to request the OIDC token
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skips cleanly on a fork or before bootstrap has been run, rather than
+      # failing a pull request for a credential it was never going to have.
+      - name: Check for a configured role
+        id: guard
+        run: echo "ready=${{ vars.AWS_ROLE_ARN != '' && vars.TF_STATE_BUCKET != '' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.guard.outputs.ready == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.guard.outputs.ready == 'true'
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: Plan
+        if: steps.guard.outputs.ready == 'true'
+        id: plan
+        run: |
+          set -euo pipefail
+          terraform -chdir=envs/dev init -input=false -no-color \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}"
+          terraform -chdir=envs/dev plan -input=false -no-color -lock-timeout=5m \
+            -out=tfplan | tee plan.txt
+          {
+            echo 'summary<<PLAN'
+            tail -c 60000 plan.txt
+            echo PLAN
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment the plan on the pull request
+        if: steps.guard.outputs.ready == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              '#### Terraform plan — `envs/dev`',
+              '',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```terraform',
+              `${{ toJSON(steps.plan.outputs.summary) }}`.slice(1, -1).replace(/\\n/g, '\n'),
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });

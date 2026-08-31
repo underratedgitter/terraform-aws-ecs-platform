@@ -1,0 +1,25 @@
+# Terraform state — never commit; it holds resource IDs and can hold secrets
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl.bak
+
+# Variable files with real values (commit the .example instead)
+*.tfvars
+!*.tfvars.example
+
+# Plan output is a binary that can contain secrets
+*.tfplan
+plan.out
+
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.DS_Store
+
+# Backend config carries the account-specific bucket name
+backend.hcl

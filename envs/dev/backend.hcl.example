@@ -1,0 +1,4 @@
+# Copy to backend.hcl and fill in from `terraform -chdir=bootstrap output`.
+bucket         = "ecs-platform-tfstate-000000000000"
+region         = "ap-south-1"
+dynamodb_table = "ecs-platform-tflocks"

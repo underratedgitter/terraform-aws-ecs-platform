@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+
+project     = "ecs-platform"
+environment = "dev"
+region      = "ap-south-1"
+
+# A NAT gateway is roughly $32/month and is not in the free tier. Off means the
+# container hosts run in public subnets, reachable only from the load balancer's
+# security group. Turn it on for anything that matters.
+enable_nat_gateway = false
+
+instance_type  = "t3.micro"
+container_port = 3000
+desired_count  = 1
+image_tag      = "latest"
