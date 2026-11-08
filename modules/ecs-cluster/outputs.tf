@@ -16,6 +16,9 @@ output "cluster_arn" {
 output "capacity_provider_name" {
   description = "Capacity provider backing the cluster, for a service's capacity_provider_strategy."
   value       = aws_ecs_capacity_provider.this.name
+
+  # A service can only use the provider once it is attached to the cluster.
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }
 
 output "instance_security_group_id" {

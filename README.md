@@ -143,17 +143,30 @@ cp backend.hcl.example backend.hcl        # fill in from the output above
 cp terraform.tfvars.example terraform.tfvars
 terraform init -backend-config=backend.hcl
 
-# 3. Read the plan before applying it.
+# 3. Create the ECR repository first. The service waits for tasks to reach a
+#    steady state, and they cannot start from an empty repository.
+terraform apply -target=module.service.aws_ecr_repository.this
+
+# 4. Build and push the image as the tag in terraform.tfvars (default: latest).
+aws ecr get-login-password | docker login --username AWS --password-stdin \
+  "$(terraform output -raw ecr_repository_url | cut -d/ -f1)"
+docker build -t "$(terraform output -raw ecr_repository_url):latest" .
+docker push "$(terraform output -raw ecr_repository_url):latest"
+
+# 5. Read the plan before applying it.
 terraform plan -out=tfplan
 terraform apply tfplan
 
-# 4. Push an image and let ECS pick it up.
-terraform output ecr_repository_url
+# 6. Open the service.
 terraform output url
 ```
 
-Nothing here creates the image. The application repository's pipeline builds it,
-scans it and pushes it to the ECR repository this creates.
+Steps 3 and 4 are only needed on the first deploy, when the repository does not
+exist yet. Run step 4 from a checkout of the application repository; after that
+its pipeline builds, scans and pushes every release.
+
+Do not set `desired_count = 0` to get around this: the service ignores changes to
+`desired_count`, so raising it later would not take effect.
 
 ### Tearing it down
 
