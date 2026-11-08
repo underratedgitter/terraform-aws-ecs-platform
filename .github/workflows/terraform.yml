@@ -47,6 +47,10 @@ jobs:
           tflint_version: v0.53.0
 
       - name: Lint
+        # tflint --init downloads plugins from the GitHub API; unauthenticated
+        # calls share the runner IP's rate limit and fail with 403.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tflint --init
