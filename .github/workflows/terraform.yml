@@ -63,19 +63,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Pinned to a release, not @master. An action reference that floats runs
-      # whatever the upstream repository contains at the moment the job starts.
+      # The Trivy image is pinned by digest. trivy-action v0.36.0's installer can no
+      # longer fetch any Trivy release, so the binary is run from its image instead.
       - name: Trivy config scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: config
-          scan-ref: .
-          format: sarif
-          output: trivy.sarif
-          exit-code: '0'
-          severity: HIGH,CRITICAL
-          # The action's default Trivy (v0.70.0) was removed upstream; pin one that exists.
-          version: v0.76.2
+        run: |
+          docker run --rm -v "$PWD:/src" \
+            aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            config --quiet --format sarif --output /src/trivy.sarif \
+            --severity HIGH,CRITICAL --exit-code 0 /src
 
       - name: Upload results
         uses: github/codeql-action/upload-sarif@v4
