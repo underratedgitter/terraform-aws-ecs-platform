@@ -2,11 +2,13 @@
 
 Terraform that provisions a working AWS environment for a containerised web
 service: network, container hosts, load balancer, registry, logs and alarms.
-Everything is a module, state lives in S3 with locking, and CI validates and
-plans on every pull request without holding a single long-lived AWS key.
+The platform is three modules wired together by one environment directory,
+the environment's state lives in S3 with DynamoDB locking, and CI validates
+every configuration and plans the dev environment on pull requests without
+holding a single long-lived AWS key.
 
 It exists to run [this Node service](https://github.com/underratedgitter/CI-CD-Pipeline-Automation-with-Docker-Cloud-Deployment),
-which until now deployed to a PaaS that hid all of the below.
+which otherwise deploys to a PaaS that hides all of the below.
 
 ---
 
@@ -117,18 +119,20 @@ on-demand, as a sanity check rather than a quote.
 | Application Load Balancer | 750 h/month + 15 LCU | ~$18/month |
 | EBS gp3 30 GiB | 30 GiB | ~$2.40/month |
 | ECR | 500 MB | $0.10/GB/month |
-| S3 state + DynamoDB locks | 5 GB / 25 WCU | pennies |
-| CloudWatch logs + 10 alarms | 5 GB ingest, 10 alarms | $0.50/GB |
+| S3 state + DynamoDB locks | 5 GB S3 / 25 GB DynamoDB | pennies |
+| CloudWatch Logs + 2 alarms | 5 GB ingest, 10 alarms | $0.50/GB |
 | **NAT gateway** *(off by default)* | **not included** | **~$32/month + $0.045/GB** |
 
-`terraform destroy` in `envs/dev` removes everything except the state bucket and
-lock table, which carry `prevent_destroy`.
+`terraform destroy` in `envs/dev` removes everything except the state bucket,
+the lock table and the CI role, all of which live in `bootstrap`; the bucket and
+table carry `prevent_destroy`.
 
 ---
 
 ## Running it
 
-Needs Terraform ≥ 1.5 and credentials for an account you are willing to spend in.
+Needs Terraform ≥ 1.17.1 (what every `required_version` pins), the AWS CLI and
+Docker, plus credentials for an account you are willing to spend in.
 
 ```bash
 # 1. State backend, one time per account.
@@ -139,7 +143,7 @@ terraform output backend_block     # values for step 2
 
 # 2. Point the dev environment at that backend.
 cd ../envs/dev
-cp backend.hcl.example backend.hcl        # fill in from the output above
+cp backend.hcl.example backend.hcl        # bucket, region and table from above
 cp terraform.tfvars.example terraform.tfvars
 terraform init -backend-config=backend.hcl
 
@@ -148,10 +152,13 @@ terraform init -backend-config=backend.hcl
 terraform apply -target=module.service.aws_ecr_repository.this
 
 # 4. Build and push the image as the tag in terraform.tfvars (default: latest).
-aws ecr get-login-password | docker login --username AWS --password-stdin \
-  "$(terraform output -raw ecr_repository_url | cut -d/ -f1)"
-docker build -t "$(terraform output -raw ecr_repository_url):latest" .
-docker push "$(terraform output -raw ecr_repository_url):latest"
+#    The terraform output calls need envs/dev as the working directory; the
+#    docker build needs the application's Dockerfile as its context.
+REGISTRY="$(terraform output -raw ecr_repository_url | cut -d/ -f1)"
+IMAGE="$(terraform output -raw ecr_repository_url):latest"
+aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+docker build -t "$IMAGE" /path/to/application
+docker push "$IMAGE"
 
 # 5. Read the plan before applying it.
 terraform plan -out=tfplan
@@ -161,9 +168,14 @@ terraform apply tfplan
 terraform output url
 ```
 
-Steps 3 and 4 are only needed on the first deploy, when the repository does not
-exist yet. Run step 4 from a checkout of the application repository; after that
-its pipeline builds, scans and pushes every release.
+`bootstrap` creates the GitHub OIDC provider by default. An account can hold only
+one, so if it already exists pass `-var='create_oidc_provider=false'` and the
+configuration reads the existing provider instead.
+
+Steps 3 and 4 are only needed on the first deploy, when the repository is empty.
+If you change `image_tag` in `terraform.tfvars`, push that tag rather than
+`latest`: after the first deploy it is only a bootstrap value, and a release is
+a new task revision.
 
 Do not set `desired_count = 0` to get around this: the service ignores changes to
 `desired_count`, so raising it later would not take effect.
@@ -192,28 +204,35 @@ modules/
   service/            ALB, target group, listener, ECR repository with a
                       lifecycle policy, log group, both IAM roles, task
                       definition, service, and two CloudWatch alarms.
-envs/dev/             Wires the three modules together. One file to copy for
-                      a second environment.
+envs/dev/             Wires the three modules together and sets the container's
+                      NODE_ENV and PORT. One file to copy for a second
+                      environment.
 ```
 
 ---
 
 ## CI
 
-`.github/workflows/terraform.yml`:
+`.github/workflows/terraform.yml` runs on every push to `main` and every pull
+request that targets it.
 
-- **fmt, validate, lint** — `terraform validate` runs with `-backend=false`, so it
-  needs no AWS credentials at all. Runs against `bootstrap`, `envs/dev` and each
-  module separately, because a module that is only ever validated through its
-  caller stops being independently valid without anyone noticing.
-- **Trivy config scan** — misconfiguration check on the HCL, results uploaded as
+- **fmt, validate, lint** — `terraform fmt -check -recursive` and
+  `terraform validate` with `-backend=false`, so validation needs no AWS
+  credentials at all. Runs against `bootstrap`, `envs/dev` and each module
+  separately, because a module that is only ever validated through its caller
+  stops being independently valid without anyone noticing. `tflint` runs
+  recursively over the same tree.
+- **Trivy config scan** — HIGH and CRITICAL misconfiguration check on the HCL,
+  with `--exit-code 0` so it reports rather than blocks. Results are uploaded as
   SARIF so findings land in the Security tab rather than scrolling past in a log.
-- **plan on pull requests** — assumes the OIDC role, plans `envs/dev`, and posts
-  the output as a PR comment. Skips cleanly when `AWS_ROLE_ARN` is not set, so a
-  fork does not fail on a credential it was never going to have.
+- **plan on pull requests** — runs after `static` passes, assumes the OIDC role,
+  plans `envs/dev`, and posts the output as a PR comment. Skips cleanly when
+  `AWS_ROLE_ARN` or `TF_STATE_BUCKET` is not set, so a fork does not fail on a
+  credential it was never going to have.
 
 Repository variables it reads: `AWS_ROLE_ARN`, `AWS_REGION`, `TF_STATE_BUCKET`,
-`TF_LOCK_TABLE` — all outputs of `bootstrap`. No secrets.
+`TF_LOCK_TABLE` — the values of `bootstrap`'s `ci_role_arn`, `region`,
+`state_bucket` and `lock_table` outputs. No secrets.
 
 ---
 
@@ -232,6 +251,9 @@ is the thing that makes the rest of it hard to trust:
 - **No autoscaling on the service.** The ASG scales hosts through the capacity
   provider; the ECS service itself sits at a fixed `desired_count`. Application
   autoscaling on ALB request count per target is the obvious next thing.
+- **No deploy pipeline.** CI validates and plans; it never applies. Registering
+  the new task revision and updating the service is left to whatever ships the
+  application.
 
 ---
 
